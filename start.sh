@@ -90,6 +90,12 @@ if [[ -z "$EMQ_LISTENER__WS__EXTERNAL__MAX_CLIENTS" ]]; then
     export EMQ_LISTENER__WS__EXTERNAL__MAX_CLIENTS=250000
 fi
 
+# Fix issue #42 - export env EMQ_DASHBOARD__DEFAULT_USER__PASSWORD to configure
+# 'dashboard.default_user.password' in etc/plugins/emq_dashboard.conf
+if [[ ! -z "$EMQ_ADMIN_PASSWORD" ]]; then
+    export EMQ_DASHBOARD__DEFAULT_USER__PASSWORD=$EMQ_ADMIN_PASSWORD
+fi
+
 # Catch all EMQ_ prefix environment variable and match it in configure file
 CONFIG=/opt/emqttd/etc/emq.conf
 CONFIG_PLUGINS=/opt/emqttd/etc/plugins
@@ -97,24 +103,24 @@ for VAR in $(env)
 do
     # Config normal keys such like node.name = emqttd@127.0.0.1
     if [[ ! -z "$(echo $VAR | grep -E '^EMQ_')" ]]; then
-        VAR_NAME=$(echo "$VAR" | sed -r "s/EMQ_(.*)=.*/\1/g" | tr '[:upper:]' '[:lower:]' | sed -r "s/__/\./g")
-        VAR_FULL_NAME=$(echo "$VAR" | sed -r "s/(.*)=.*/\1/g")
+        VAR_NAME=$(echo "$VAR" | sed -r "s/EMQ_([^=]*)=.*/\1/g" | tr '[:upper:]' '[:lower:]' | sed -r "s/__/\./g")
+        VAR_FULL_NAME=$(echo "$VAR" | sed -r "s/([^=]*)=.*/\1/g")
         # Config in emq.conf
         if [[ ! -z "$(cat $CONFIG |grep -E "^(^|^#*|^#*\s*)$VAR_NAME")" ]]; then
             echo "$VAR_NAME=$(eval echo \$$VAR_FULL_NAME)"
-            sed -r -i "s/(^#*\s*)($VAR_NAME)\s*=\s*(.*)/\2 = $(eval echo \$$VAR_FULL_NAME)/g" $CONFIG
+            sed -r -i "s/(^#*\s*)($VAR_NAME)\s*=\s*(.*)/\2 = $(eval echo \$$VAR_FULL_NAME|sed -e 's/\//\\\//g')/g" $CONFIG
         fi
         # Config in plugins/*
         if [[ ! -z "$(cat $CONFIG_PLUGINS/* |grep -E "^(^|^#*|^#*\s*)$VAR_NAME")" ]]; then
             echo "$VAR_NAME=$(eval echo \$$VAR_FULL_NAME)"
-            sed -r -i "s/(^#*\s*)($VAR_NAME)\s*=\s*(.*)/\2 = $(eval echo \$$VAR_FULL_NAME)/g" $(ls $CONFIG_PLUGINS/*)
-        fi
+            sed -r -i "s/(^#*\s*)($VAR_NAME)\s*=\s*(.*)/\2 = $(eval echo \$$VAR_FULL_NAME|sed -e 's/\//\\\//g')/g" $(ls $CONFIG_PLUGINS/*)
+        fi        
     fi
     # Config template such like {{ platform_etc_dir }}
     if [[ ! -z "$(echo $VAR | grep -E '^PLATFORM_')" ]]; then
-        VAR_NAME=$(echo "$VAR" | sed -r "s/(.*)=.*/\1/g"| tr '[:upper:]' '[:lower:]')
-        VAR_FULL_NAME=$(echo "$VAR" | sed -r "s/(.*)=.*/\1/g")
-        sed -r -i "s@\{\{\s*$VAR_NAME\s*\}\}@$(eval echo \$$VAR_FULL_NAME)@g" $CONFIG
+        VAR_NAME=$(echo "$VAR" | sed -r "s/([^=]*)=.*/\1/g"| tr '[:upper:]' '[:lower:]')
+        VAR_FULL_NAME=$(echo "$VAR" | sed -r "s/([^=]*)=.*/\1/g")
+        sed -r -i "s@\{\{\s*$VAR_NAME\s*\}\}@$(eval echo \$$VAR_FULL_NAME|sed -e 's/\//\\\//g')@g" $CONFIG
     fi
 done
 
@@ -132,9 +138,10 @@ fi
 
 # Start and run emqttd, and when emqttd crashed, this container will stop
 
-/opt/emqttd/bin/emqttd foreground &
+/opt/emqttd/bin/emqttd start
+tail -f /opt/emqttd/log/erlang.log.1 &
 
-# wait and ensure emqttd status is running
+# Wait and ensure emqttd status is running
 WAIT_TIME=0
 while [[ -z "$(/opt/emqttd/bin/emqttd_ctl status |grep 'is running'|awk '{print $1}')" ]]
 do
@@ -146,6 +153,9 @@ do
         exit 1
     fi
 done
+
+# Sleep 5 seconds to wait for the loaded plugins catch up.
+sleep 5
 
 echo "['$(date -u +"%Y-%m-%dT%H:%M:%SZ")']:emqttd start"
 
@@ -175,7 +185,7 @@ fi
 #          and docker dispatching system can known and restart this container.
 IDLE_TIME=0
 while [[ $IDLE_TIME -lt 5 ]]
-do
+do  
     IDLE_TIME=$((IDLE_TIME+1))
     if [[ ! -z "$(/opt/emqttd/bin/emqttd_ctl status |grep 'is running'|awk '{print $1}')" ]]; then
         IDLE_TIME=0
@@ -184,6 +194,7 @@ do
     fi
     sleep 5
 done
+
 # If running to here (the result 5 times not is running, thus in 25s emq is not running), exit docker image
 # Then the high level PaaS, e.g. docker swarm mode, will know and alert, rebanlance this service
 
